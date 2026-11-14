@@ -8,7 +8,8 @@ from app.schema.session_schema import MessageItem
 from app.core.app_exceptions import AppException, AppExceptionCode
 from app.core.loger import get_logger
 from app.models.session import Session
-from app.repository.pg_repository import PgRepository
+from app.repository.running_chat_pg_repo import RunningChatPgRepo
+from app.repository.session_pg_repo import SessionPgRepo
 from app.schema.user_schema import UserSchema
 
 logger = get_logger(__name__)
@@ -18,11 +19,13 @@ class SessionService:
 
     def __init__(
             self,
-            pg_repository: PgRepository,
+            session_pg_repo: SessionPgRepo,
+            running_chat_pg_repo: RunningChatPgRepo,
             checkpointer: BaseCheckpointSaver,
             graph: CompiledStateGraph,
     ):
-        self._pg_repository = pg_repository
+        self._session_pg_repo = session_pg_repo
+        self._running_chat_pg_repo = running_chat_pg_repo
         self._checkpointer = checkpointer
         self._graph = graph
 
@@ -32,8 +35,8 @@ class SessionService:
             page: int,
             size: int,
     ) -> tuple[list[Session], int]:
-        total = await self._pg_repository.count_sessions(user_schema.user_id)
-        sessions = await self._pg_repository.list_sessions(
+        total = await self._session_pg_repo.count_sessions(user_schema.user_id)
+        sessions = await self._session_pg_repo.list_sessions(
             user_schema.user_id,
             limit=size,
             offset=(page - 1) * size,
@@ -46,7 +49,7 @@ class SessionService:
             session_pk: uuid.UUID,
             title: str,
     ) -> str:
-        session = await self._pg_repository.rename_session(
+        session = await self._session_pg_repo.rename_session(
             user_schema.user_id,
             session_pk,
             title,
@@ -54,7 +57,7 @@ class SessionService:
         if session is None:
             raise AppException(AppExceptionCode.NOT_FOUND, "会话不存在")
 
-        await self._pg_repository.commit()
+        await self._session_pg_repo.commit()
         return title
 
     async def delete_session(
@@ -62,14 +65,14 @@ class SessionService:
             user_schema: UserSchema,
             session_pk: uuid.UUID,
     ) -> None:
-        session = await self._pg_repository.get_session_by_session_pk(
+        session = await self._session_pg_repo.get_session_by_session_pk(
             user_schema.user_id,
             session_pk,
         )
         if session is None:
             raise AppException(AppExceptionCode.NOT_FOUND, "会话不存在")
 
-        if await self._pg_repository.has_running_chat(session_pk):
+        if await self._running_chat_pg_repo.has_running_chat(session_pk):
             raise AppException(
                 AppExceptionCode.CONFLICT,
                 "当前会话正在对话中，请稍后再删除",
@@ -78,14 +81,14 @@ class SessionService:
         # commit 后 ORM 对象会过期，先把 thread_id 取出来
         thread_id = session.thread_id
 
-        await self._pg_repository.delete_running_chats(session_pk)
-        deleted = await self._pg_repository.delete_session(
+        await self._running_chat_pg_repo.delete_running_chats(session_pk)
+        deleted = await self._session_pg_repo.delete_session(
             user_schema.user_id,
             session_pk,
         )
         if not deleted:
             raise AppException(AppExceptionCode.NOT_FOUND, "会话不存在")
-        await self._pg_repository.commit()
+        await self._session_pg_repo.commit()
 
         # DB 已提交；checkpoint 删失败只留孤儿数据，不能让接口失败
         try:
@@ -100,7 +103,7 @@ class SessionService:
             limit: int = 100,
             include_tools: bool = False,
     ) -> tuple[list[MessageItem], int, bool, str | None]:
-        session = await self._pg_repository.get_session_by_session_pk(
+        session = await self._session_pg_repo.get_session_by_session_pk(
             user_schema.user_id,
             session_pk,
         )

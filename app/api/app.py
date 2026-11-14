@@ -11,6 +11,7 @@ from app.agent.main_agent import build_main_agent, main_agent_no_checkpointer
 from app.api.exception_handler import register_exception_handlers
 from app.api.router.chat_router import chat_router
 from app.api.router.session_router import session_router
+from app.api.router.user_router import user_router
 from app.config.checkpoint_config import checkpoint_config
 from app.core.constants import LOG_FILE_PATH, PROMPTS_PATH, AGENT_WORK_SPACE_PATH
 from app.core.loger import setup_logging, get_logger
@@ -85,6 +86,7 @@ app = FastAPI(description="简历助手", lifespan=lifespan)
 
 app.include_router(router=chat_router)
 app.include_router(router=session_router)
+app.include_router(router=user_router)
 
 app.add_middleware(
     CORSMiddleware,

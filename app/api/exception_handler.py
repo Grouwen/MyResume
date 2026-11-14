@@ -19,7 +19,7 @@ def register_exception_handlers(app: FastAPI):
 
     @app.exception_handler(AuthException)
     async def app_error_handler(request: Request, exc: AppException):
-        logger.info(f"Auth失败，{exc.message}-> {request.headers.get('Authorization')}")
+        logger.info(f"Auth失败，{exc.message}")
 
         return JSONResponse(status_code=exc.code.value,
                             content={"code": exc.code.value, "msg": exc.message, "data": None})

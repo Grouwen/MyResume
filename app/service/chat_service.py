@@ -23,7 +23,8 @@ from app.infrastructure.llm.llm_credential import LLMCredential
 from app.infrastructure.llm.llm_factory import LLMFactory
 from app.models.running_chat import RunningChat
 from app.oper.httpx_oper import HttpxOper
-from app.repository.pg_repository import PgRepository
+from app.repository.running_chat_pg_repo import RunningChatPgRepo
+from app.repository.session_pg_repo import SessionPgRepo
 from app.schema.chat_schema import ChatSchema
 from app.schema.result import Result
 from app.schema.user_schema import UserSchema
@@ -38,7 +39,8 @@ class ChatService:
                  skill_regis:SkillRegis,
                  tool_regis:ToolRegis,
                  httpx_oper: HttpxOper,
-                 pg_repository: PgRepository,
+                 session_pg_repo: SessionPgRepo,
+                 running_chat_pg_repo: RunningChatPgRepo,
                  pg_session_factory: async_sessionmaker[AsyncSession],
                  main_agent: CompiledStateGraph):
         self._llm_factory = llm_factory
@@ -46,7 +48,8 @@ class ChatService:
         self._skill_regis = skill_regis
         self._tool_regis = tool_regis
         self._httpx_oper = httpx_oper
-        self._pg_repository = pg_repository
+        self._session_pg_repo = session_pg_repo
+        self._running_chat_pg_repo = running_chat_pg_repo
         self._pg_session_factory = pg_session_factory
         self._main_agent = main_agent
 
@@ -66,7 +69,7 @@ class ChatService:
         try:
             if is_login:
                 # 单用户限制最大对话数
-                running_chats = await self._pg_repository.list_running_chats(user_id)
+                running_chats = await self._running_chat_pg_repo.list_running_chats(user_id)
                 running_session_pks = [chat.session_pk for chat in running_chats]
                 if len(running_chats) >= PER_USER_MAX_CHAT:
                     yield ServerSentEvent(
@@ -84,11 +87,12 @@ class ChatService:
             if is_login:
                 # 有session_pk就更新没有就新建
                 thread_id = f"{user_id}:{chat_schema.session_pk}"
-                await self._pg_repository.upsert_session(chat_schema.session_pk, user_id, thread_id)
-                await self._pg_repository.add_running_chat(
+                await self._session_pg_repo.upsert_session(chat_schema.session_pk, user_id, thread_id)
+                await self._running_chat_pg_repo.add_running_chat(
                     RunningChat(user_id=user_id, session_pk=chat_schema.session_pk, user_input=chat_schema.user_input)
                 )
-                await self._pg_repository.commit()
+                await self._running_chat_pg_repo.commit()
+                await self._session_pg_repo.close()
             else:
                 thread_id = f"{user_id}:{uuid.uuid4().hex}"
 
@@ -201,8 +205,8 @@ class ChatService:
 
             if not no_save:
                 async with pg_session_factory.begin() as session:
-                    pg_repository = PgRepository(session)
-                    await pg_repository.update_running_chat_status(chat_schema.session_pk, RunningChatTypeEnum.DONE)
+                    running_chat_pg_repo = RunningChatPgRepo(session)
+                    await running_chat_pg_repo.update_running_chat_status(chat_schema.session_pk, RunningChatTypeEnum.DONE)
 
         except Exception as e:
             logger.error(f"chat 流式处理失败：{e}")
@@ -215,7 +219,7 @@ class ChatService:
                 )
             if not no_save:
                 async with pg_session_factory.begin() as session:
-                    pg_repository = PgRepository(session)
-                    await pg_repository.update_running_chat_status(chat_schema.session_pk,RunningChatTypeEnum.ERROR)
+                    running_chat_pg_repo = RunningChatPgRepo(session)
+                    await running_chat_pg_repo.update_running_chat_status(chat_schema.session_pk,RunningChatTypeEnum.ERROR)
         finally:
             queue.put_nowait(None)

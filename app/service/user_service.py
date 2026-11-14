@@ -6,7 +6,8 @@ from fastapi import Request
 from app.core.loger import get_logger
 from app.models.account_verify import AccountVerify
 from app.models.user import User
-from app.repository.pg_repository import PgRepository
+from app.repository.account_verify_pg_repo import AccountVerifyPgRepo
+from app.repository.user_pg_repo import UserPgRepo
 from app.schema.result import Result
 from app.schema.user_schema import LoginUserSchema, UserSchema
 from app.util.email_util import send_email
@@ -21,8 +22,10 @@ EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 
 class UserService:
     def __init__(self,
-                 pg_repository: PgRepository):
-        self._pg_repository = pg_repository
+                 user_pg_repo: UserPgRepo,
+                 account_verify_pg_repo: AccountVerifyPgRepo):
+        self._user_pg_repo = user_pg_repo
+        self._account_verify_pg_repo = account_verify_pg_repo
 
     async def send_email_service(self, user_email,request: Request):
         user_email = handle_email(user_email)
@@ -43,7 +46,7 @@ class UserService:
         expires_min = 5
 
         # 根据ip查看expires_min内发送的次数
-        all_record = await self._pg_repository.list_account_verify_by_ip(client_ip)
+        all_record = await self._account_verify_pg_repo.list_account_verify_by_ip(client_ip)
         if len(all_record) >= PER_IP_MAX_VERIFY:
             return Result.error(f"{expires_min}分钟内获取验证码次数过多，请稍后")
 
@@ -55,9 +58,9 @@ class UserService:
             client_ip=client_ip
         )
 
-        await self._pg_repository.add_account_verify(acco_ver)
+        await self._account_verify_pg_repo.add_account_verify(acco_ver)
 
-        await self._pg_repository.commit()
+        await self._account_verify_pg_repo.commit()
 
         try:
             await send_email(user_email, subject, html_content.format(code=code,
@@ -67,8 +70,8 @@ class UserService:
         except Exception as e:
             logger.exception(f"发送验证码失败 email={user_email},exc={type(e).__name__}: {e}")
             try:
-                await self._pg_repository.delete_account_verify(acco_ver.id)
-                await self._pg_repository.commit()
+                await self._account_verify_pg_repo.delete_account_verify(acco_ver.id)
+                await self._account_verify_pg_repo.commit()
             except Exception:
                 logger.exception(f"清理未送达验证码失败 id={acco_ver.id}")
             return Result.error(f"发送邮件失败{type(e).__name__}")
@@ -78,25 +81,25 @@ class UserService:
         if not user_email:
             return Result.error("邮箱格式错误")
 
-        account_verify = await self._pg_repository.get_account_verify_by_email_and_code(
+        account_verify = await self._account_verify_pg_repo.get_account_verify_by_email_and_code(
             user_email,
             login_user_schema.code
         )
         if not account_verify:
             return Result.error("验证码或邮箱错误")
 
-        if not await self._pg_repository.delete_account_verify(account_verify.id):
+        if not await self._account_verify_pg_repo.delete_account_verify(account_verify.id):
             return Result.error("验证码或邮箱错误")
 
-        user = await self._pg_repository.get_user_by_email(user_email)
+        user = await self._user_pg_repo.get_user_by_email(user_email)
         if user is None:
-            user = await self._pg_repository.add_user(User(
+            user = await self._user_pg_repo.add_user(User(
                 user_nick_name="",
                 user_email=user_email,
             ))
             user.user_nick_name = f"用户{user.id:06d}"
 
-        await self._pg_repository.commit()
+        await self._user_pg_repo.commit()
 
         user_schema = UserSchema(
             user_id=user.id,

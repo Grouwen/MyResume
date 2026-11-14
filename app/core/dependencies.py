@@ -7,10 +7,14 @@ from app.agent.core.skill_regis import SkillRegis
 from app.agent.core.tool_regis import ToolRegis
 from app.infrastructure.llm.llm_factory import LLMFactory
 from app.oper.httpx_oper import HttpxOper
-from app.repository.pg_repository import PgRepository
+from app.repository.account_verify_pg_repo import AccountVerifyPgRepo
+from app.repository.running_chat_pg_repo import RunningChatPgRepo
+from app.repository.session_pg_repo import SessionPgRepo
+from app.repository.user_pg_repo import UserPgRepo
 from app.service.chat_service import ChatService
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from app.service.session_service import SessionService
+from app.service.user_service import UserService
 
 async def get_llm_factory(request: Request) -> LLMFactory:
     return request.app.state.llm_factory
@@ -50,8 +54,21 @@ async def get_pg_session(request: Request):
         yield session
 
 
-async def get_pg_repository(session: AsyncSession = Depends(get_pg_session)) -> PgRepository:
-    return PgRepository(session=session)
+# 同一次请求内 FastAPI 会缓存 get_pg_session，下面各仓储共享同一个 session（同一笔事务）
+async def get_user_pg_repo(session: AsyncSession = Depends(get_pg_session)) -> UserPgRepo:
+    return UserPgRepo(session=session)
+
+
+async def get_account_verify_pg_repo(session: AsyncSession = Depends(get_pg_session)) -> AccountVerifyPgRepo:
+    return AccountVerifyPgRepo(session=session)
+
+
+async def get_session_pg_repo(session: AsyncSession = Depends(get_pg_session)) -> SessionPgRepo:
+    return SessionPgRepo(session=session)
+
+
+async def get_running_chat_pg_repo(session: AsyncSession = Depends(get_pg_session)) -> RunningChatPgRepo:
+    return RunningChatPgRepo(session=session)
 
 
 # ---------------- Service ----------------
@@ -61,7 +78,8 @@ async def get_chat_service(
         skill_regis: SkillRegis = Depends(get_skill_regis),
         tool_regis: ToolRegis = Depends(get_tool_regis),
         httpx_oper: HttpxOper = Depends(get_httpx_oper),
-        pg_repository: PgRepository = Depends(get_pg_repository),
+        session_pg_repo: SessionPgRepo = Depends(get_session_pg_repo),
+        running_chat_pg_repo: RunningChatPgRepo = Depends(get_running_chat_pg_repo),
         pg_session_factory: async_sessionmaker[AsyncSession] = Depends(get_pg_session_factory),
         main_agent: CompiledStateGraph = Depends(get_main_agent),
 ) -> ChatService:
@@ -70,17 +88,29 @@ async def get_chat_service(
                        skill_regis=skill_regis,
                        tool_regis=tool_regis,
                        httpx_oper=httpx_oper,
-                       pg_repository=pg_repository,
+                       session_pg_repo=session_pg_repo,
+                       running_chat_pg_repo=running_chat_pg_repo,
                        pg_session_factory=pg_session_factory,
                        main_agent=main_agent)
 
 async def get_session_service(
-        pg_repository: PgRepository = Depends(get_pg_repository),
+        session_pg_repo: SessionPgRepo = Depends(get_session_pg_repo),
+        running_chat_pg_repo: RunningChatPgRepo = Depends(get_running_chat_pg_repo),
         checkpointer: BaseCheckpointSaver = Depends(get_checkpointer),
         graph: CompiledStateGraph = Depends(get_main_agent),
 ) -> SessionService:
     return SessionService(
-        pg_repository=pg_repository,
+        session_pg_repo=session_pg_repo,
+        running_chat_pg_repo=running_chat_pg_repo,
         checkpointer=checkpointer,
         graph=graph,
+    )
+
+async def get_user_service(
+        user_pg_repo: UserPgRepo = Depends(get_user_pg_repo),
+        account_verify_pg_repo: AccountVerifyPgRepo = Depends(get_account_verify_pg_repo),
+) -> UserService:
+    return UserService(
+        user_pg_repo=user_pg_repo,
+        account_verify_pg_repo=account_verify_pg_repo,
     )

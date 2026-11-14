@@ -2,7 +2,6 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.constants import END
 from langgraph.graph import StateGraph
 
-from app.graph.node.main_agent.after_one_act import after_one_act_node
 from app.graph.node.main_agent.before_call_llm_node import before_call_llm_node
 from app.graph.node.main_agent.call_llm_node import call_llm_node
 from app.graph.node.main_agent.call_tool_node import call_tool_node
@@ -15,7 +14,7 @@ from app.graph.state.main_agent.output_state import OutputMainAgentState
 
 def route_after_one_act(state: MainAgentState):
     if state.get("finalize", False):
-        return "finalize_node"
+        return END
     return "before_call_llm_node"
 
 
@@ -31,7 +30,6 @@ def build_main_agent(checkpointer: BaseCheckpointSaver | None = None):
     agent.add_node("before_call_llm_node", before_call_llm_node)
     agent.add_node("call_llm_node", call_llm_node)
     agent.add_node("call_tool_node", call_tool_node)
-    agent.add_node("after_one_act_node", after_one_act_node)
     agent.add_node("finalize_node", finalize_node)
 
     agent.set_entry_point("entrance_node")
@@ -39,19 +37,22 @@ def build_main_agent(checkpointer: BaseCheckpointSaver | None = None):
     agent.add_edge("entrance_node", "before_call_llm_node")
     agent.add_edge("before_call_llm_node", "call_llm_node")
     agent.add_edge("call_llm_node", "call_tool_node")
-    agent.add_edge("call_tool_node", "after_one_act_node")
+    agent.add_edge("call_tool_node", "finalize_node")
     agent.add_conditional_edges(
-        "after_one_act_node",
+        "finalize_node",
         route_after_one_act,
         {
-            "finalize_node": "finalize_node",
             "before_call_llm_node": "before_call_llm_node",
-        },
+            END:END
+        }
     )
-    agent.add_edge("finalize_node", END)
 
     return agent.compile(checkpointer=checkpointer)
 
 
 # 未登录用户：不落库、不共享历史
 main_agent_no_checkpointer = build_main_agent()
+
+if __name__ == '__main__':
+    mermaid_code = main_agent_no_checkpointer.get_graph().draw_mermaid()
+    print(mermaid_code)
