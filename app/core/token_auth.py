@@ -45,3 +45,11 @@ async def get_current_user(
 
 
     return user_schema
+
+async def require_login(
+    user_schema: UserSchema = Depends(get_current_user),
+) -> UserSchema:
+    """需要登录的接口用它；匿名用户（user_id == -1）直接 401。"""
+    if user_schema.user_id == -1:
+        raise AuthException("请先登录")
+    return user_schema

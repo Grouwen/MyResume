@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 from app.agent.core.agent_exceptions import ToolException, ToolExceptionType
 from app.graph.context.main_agent_context import MainAgentContext
-from app.util.agent_util import verify_file_path
+from app.util.agent_util import verify_file_path_async
 
 PAGE_SIZE = 5000
 
@@ -28,7 +28,7 @@ async def read(runtime: ToolRuntime[MainAgentContext],
     page = max(1, page)
 
     # 校验
-    accept,reason = verify_file_path(file_path,agent_work_space,True,False)
+    accept, reason = await verify_file_path_async(file_path, agent_work_space, True, False)
     if not accept:
         raise ToolException(
             ToolExceptionType.INVALID_ARGUMENTS,

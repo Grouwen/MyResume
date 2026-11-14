@@ -9,7 +9,8 @@ from app.infrastructure.llm.llm_factory import LLMFactory
 from app.oper.httpx_oper import HttpxOper
 from app.repository.pg_repository import PgRepository
 from app.service.chat_service import ChatService
-
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from app.service.session_service import SessionService
 
 async def get_llm_factory(request: Request) -> LLMFactory:
     return request.app.state.llm_factory
@@ -30,6 +31,8 @@ async def get_tool_regis(request: Request) -> ToolRegis:
 async def get_httpx_oper(request: Request) -> HttpxOper:
     return request.app.state.httpx_oper
 
+async def get_checkpointer(request: Request) -> BaseCheckpointSaver:
+    return request.app.state.checkpointer
 
 # ---------------- Agent ----------------
 async def get_main_agent(request: Request) -> CompiledStateGraph:
@@ -70,3 +73,14 @@ async def get_chat_service(
                        pg_repository=pg_repository,
                        pg_session_factory=pg_session_factory,
                        main_agent=main_agent)
+
+async def get_session_service(
+        pg_repository: PgRepository = Depends(get_pg_repository),
+        checkpointer: BaseCheckpointSaver = Depends(get_checkpointer),
+        graph: CompiledStateGraph = Depends(get_main_agent),
+) -> SessionService:
+    return SessionService(
+        pg_repository=pg_repository,
+        checkpointer=checkpointer,
+        graph=graph,
+    )

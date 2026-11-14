@@ -1,4 +1,6 @@
+import asyncio
 from pathlib import Path
+
 from langchain_core.tools import BaseTool
 from langgraph.runtime import Runtime
 
@@ -7,11 +9,14 @@ from app.agent.core.tool_regis import ToolRegis
 from app.graph.context.main_agent_context import MainAgentContext
 
 
-def verify_file_path(file_path:str,
-                     base_path:Path,
-                     must_exist:bool,
-                     is_dir:bool=False,):
-    """成功返回 (绝对路径, None)；失败返回 (None, 失败原因)。"""
+def verify_file_path(file_path: str,
+                     base_path: Path,
+                     must_exist: bool,
+                     is_dir: bool = False) -> tuple[bool, str | None]:
+    """成功返回 (True, None)；失败返回 (False, 失败原因)。
+
+    内部要 resolve + stat，都是阻塞调用；协程里请用 verify_file_path_async。
+    """
     raw = file_path.strip()
     if not raw:
         return False, "路径为空"
@@ -34,6 +39,14 @@ def verify_file_path(file_path:str,
             return False, "路径为目录而非文件"
 
     return True, None
+
+
+async def verify_file_path_async(file_path: str,
+                                 base_path: Path,
+                                 must_exist: bool,
+                                 is_dir: bool = False) -> tuple[bool, str | None]:
+    """verify_file_path 的异步版：校验会打 resolve/stat，丢线程池免得卡住事件循环。"""
+    return await asyncio.to_thread(verify_file_path, file_path, base_path, must_exist, is_dir)
 
 
 def get_active_tools(tool_regis:ToolRegis,plug_regis:PlugRegis,

@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from app.agent.core.agent_exceptions import ToolException, ToolExceptionType
 from app.graph.context.main_agent_context import MainAgentContext
-from app.util.agent_util import verify_file_path
+from app.util.agent_util import verify_file_path_async
 
 _SMART_SINGLE = re.compile(r"[\u2018\u2019\u201A\u201B]")
 _SMART_DOUBLE = re.compile(r"[\u201C\u201D\u201E\u201F]")
@@ -39,7 +39,7 @@ async def edit(
     agent_work_space: Path = runtime.context.agent_work_space
 
     # 校验
-    accept,reason = verify_file_path(file_path,agent_work_space,True,False)
+    accept, reason = await verify_file_path_async(file_path, agent_work_space, True, False)
     if not accept:
         raise ToolException(
             ToolExceptionType.INVALID_ARGUMENTS,

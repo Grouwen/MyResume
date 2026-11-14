@@ -12,11 +12,11 @@ from app.schema.result import Result
 from app.schema.user_schema import UserSchema
 from app.service.chat_service import ChatService
 
-router = APIRouter()
+chat_router = APIRouter(prefix="/api/chat", tags=["对话"])
 
 logger = get_logger(__name__)
 
-@router.post("/api/chat", response_class=EventSourceResponse)
+@chat_router.post("", response_class=EventSourceResponse)
 async def chat(chat_schema:ChatSchema,
                chat_service: ChatService = Depends(get_chat_service),
                user_schema:UserSchema = Depends(get_current_user)) -> AsyncIterator[ServerSentEvent]:

@@ -1,5 +1,6 @@
 import logging
 from typing import Dict, List
+import json
 
 from jinja2 import Template
 from langchain_core.messages import AIMessage, SystemMessage, HumanMessage, BaseMessage
@@ -12,7 +13,7 @@ from app.core.loger import get_logger
 from app.graph.context.main_agent_context import MainAgentContext
 from app.graph.state.main_agent.main_agent_state import MainAgentState
 from app.util.agent_util import get_active_tools
-from app.util.log_util import debug_body
+from app.util.log_util import preview, debug_body
 
 logger = get_logger(__name__)
 
@@ -41,17 +42,32 @@ def trim_by_turns(messages: list, max_turns: int = MAX_TURNS) -> list:
         return messages
     return messages[human_idx[-max_turns]:]
 
+
+def _args_preview(call: dict) -> str:
+    return preview(json.dumps(call.get("args") or {}, ensure_ascii=False))
+
+
+
 def summarize_ai_msg(resp: AIMessage) -> str:
-    """INFO 里只放排障要的字段，正文一律不进日志。"""
+    """INFO 里只放排障要的字段，正文一律不进日志（参数只留摘要）。"""
     meta = resp.response_metadata or {}
     usage = resp.usage_metadata or {}
     calls = ", ".join(
-        f"{c.get('name')}#{c.get('id')}" for c in (resp.tool_calls or [])
+        f"{c.get('name')}#{c.get('id')} args={_args_preview(c)}"
+        for c in (resp.tool_calls or [])
     ) or "-"
+
+    bad = resp.invalid_tool_calls or []
+    bad_str = " [" + "; ".join(
+        f"{b.get('name')}#{b.get('id')} err={b.get('error')} "
+        f"raw={preview(str(b.get('args')))}"
+        for b in bad
+    ) + "]" if bad else ""
+
     return (
         f"model={meta.get('model_name')} finish={meta.get('finish_reason')} "
         f"in={usage.get('input_tokens')} out={usage.get('output_tokens')} "
-        f"len={len(resp.content or '')} tool_calls=[{calls}]"
+        f"len={len(resp.content or '')} tool_calls=[{calls}]{bad_str}"
     )
 
 
@@ -92,6 +108,12 @@ async def call_llm_node(state:MainAgentState,
     logger.info("ai回复 %s", summarize_ai_msg(resp))
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug("ai回复全文：\n%s", debug_body(resp.content))
+        for c in resp.tool_calls or []:
+            logger.debug(
+                "tool参数全文 tool=%s id=%s args=%s",
+                c.get("name"), c.get("id"),
+                debug_body(json.dumps(c.get("args") or {}, ensure_ascii=False, indent=2)),
+            )
 
     return {
         "messages": [resp]

@@ -4,6 +4,7 @@ from app.core.enum.running_chat_type_enum import RunningChatTypeEnum
 from app.models.running_chat import RunningChat
 from app.models.session import Session
 from sqlalchemy import select, update, func
+from sqlalchemy import select, update, func, delete
 
 
 class PgRepository:
@@ -24,11 +25,18 @@ class PgRepository:
         return list(result.scalars().all())
 
     # 按 user_id 查该用户所有会话
-    async def list_sessions(self, user_id: int) -> list[Session]:
+    async def list_sessions(
+            self,
+            user_id: int,
+            limit: int = 20,
+            offset: int = 0,
+    ) -> list[Session]:
         stmt = (
             select(Session)
             .where(Session.user_id == user_id)
             .order_by(Session.last_active.desc())
+            .limit(limit)
+            .offset(offset)
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
@@ -44,6 +52,27 @@ class PgRepository:
         )
         result = await self._session.execute(stmt)
         return result.scalars().first()
+
+    async def count_sessions(self, user_id: int) -> int:
+        stmt = (
+            select(func.count())
+            .select_from(Session)
+            .where(Session.user_id == user_id)
+        )
+        result = await self._session.execute(stmt)
+        return int(result.scalar_one())
+
+    async def has_running_chat(self, session_pk: uuid.UUID) -> bool:
+        stmt = (
+            select(func.count())
+            .select_from(RunningChat)
+            .where(
+                RunningChat.session_pk == session_pk,
+                RunningChat.status == RunningChatTypeEnum.RUNNING.value,
+            )
+        )
+        result = await self._session.execute(stmt)
+        return int(result.scalar_one()) > 0
 
 
     # ______________________ 更新 ______________________
@@ -90,6 +119,19 @@ class PgRepository:
         result = await self._session.execute(stmt)
         return result.rowcount
 
+    async def rename_session(
+            self,
+            user_id: int,
+            session_pk: uuid.UUID,
+            title: str,
+    ) -> Session | None:
+        existing = await self.get_session_by_session_pk(user_id, session_pk)
+        if existing is None:
+            return None
+        existing.title = title
+        await self._session.flush()
+        return existing
+
 
     # ______________________ 插入 ______________________
     # 插入一条 running_chat 记录
@@ -97,6 +139,20 @@ class PgRepository:
         self._session.add(running_chat)
         await self._session.flush()
         return running_chat
+
+    # ______________________ 删除 ______________________
+    async def delete_session(self, user_id: int, session_pk: uuid.UUID) -> bool:
+        stmt = delete(Session).where(
+            Session.user_id == user_id,
+            Session.session_pk == session_pk,
+        )
+        result = await self._session.execute(stmt)
+        return (result.rowcount or 0) > 0
+
+    async def delete_running_chats(self, session_pk: uuid.UUID) -> int:
+        stmt = delete(RunningChat).where(RunningChat.session_pk == session_pk)
+        result = await self._session.execute(stmt)
+        return result.rowcount or 0
 
     # ______________________ 提交 ______________________
     async def commit(self):
