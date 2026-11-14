@@ -1,10 +1,13 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 import uuid
 from app.core.enum.running_chat_type_enum import RunningChatTypeEnum
+from app.models.account_verify import AccountVerify
 from app.models.running_chat import RunningChat
 from app.models.session import Session
 from sqlalchemy import select, update, func
 from sqlalchemy import select, update, func, delete
+
+from app.models.user import User
 
 
 class PgRepository:
@@ -74,6 +77,47 @@ class PgRepository:
         result = await self._session.execute(stmt)
         return int(result.scalar_one()) > 0
 
+    # 按 client_ip 查该 IP 未过期的验证码记录
+    async def list_account_verify_by_ip(self, client_ip: str) -> list[AccountVerify]:
+        stmt = (
+            select(AccountVerify)
+            .where(
+                AccountVerify.client_ip == client_ip,
+                AccountVerify.expires_at > func.now(),
+            )
+            .order_by(AccountVerify.created_at.desc())
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    # 按 email 查最新一条未过期验证码：更早的码自动失效
+    async def get_account_verify_by_email_and_code(self, email: str, code: int) -> AccountVerify | None:
+        stmt = (
+            select(AccountVerify)
+            .where(
+                AccountVerify.email == email,
+                AccountVerify.expires_at > func.now(),
+            )
+            .order_by(AccountVerify.created_at.desc(), AccountVerify.id.desc())
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        record = result.scalars().first()
+        if record is None or record.code != code:
+            return None
+        return record
+
+    # 按 id 查用户
+    async def get_user_by_id(self, user_id: int) -> User | None:
+        stmt = select(User).where(User.id == user_id)
+        result = await self._session.execute(stmt)
+        return result.scalars().first()
+
+    # 按 email 查用户
+    async def get_user_by_email(self, email: str) -> User | None:
+        stmt = select(User).where(User.user_email == email)
+        result = await self._session.execute(stmt)
+        return result.scalars().first()
 
     # ______________________ 更新 ______________________
     # session_pk 存在则只更新 last_active，不存在则新建一条 session
@@ -140,6 +184,18 @@ class PgRepository:
         await self._session.flush()
         return running_chat
 
+    # 插入一条 account_verify 记录
+    async def add_account_verify(self, account_verify: AccountVerify) -> AccountVerify:
+        self._session.add(account_verify)
+        await self._session.flush()
+        return account_verify
+
+    # 插入一条 user 记录
+    async def add_user(self, user: User) -> User:
+        self._session.add(user)
+        await self._session.flush()
+        return user
+
     # ______________________ 删除 ______________________
     async def delete_session(self, user_id: int, session_pk: uuid.UUID) -> bool:
         stmt = delete(Session).where(
@@ -154,6 +210,24 @@ class PgRepository:
         result = await self._session.execute(stmt)
         return result.rowcount or 0
 
-    # ______________________ 提交 ______________________
+    # 消费验证码：删除成功说明这次请求抢到了，并发下只有一个能成功
+    async def delete_account_verify(self, verify_id: int) -> bool:
+        stmt = delete(AccountVerify).where(AccountVerify.id == verify_id)
+        result = await self._session.execute(stmt)
+        return (result.rowcount or 0) > 0
+
+    # 删除该邮箱所有未过期验证码（登录成功后调用）
+    async def delete_account_verify_by_email(self, email: str) -> int:
+        stmt = delete(AccountVerify).where(
+            AccountVerify.email == email,
+            AccountVerify.expires_at > func.now(),
+        )
+        result = await self._session.execute(stmt)
+        return result.rowcount or 0
+
+    # ______________________ 提交 | 回滚 ______________________
     async def commit(self):
         await self._session.commit()
+
+    async def rollback(self) -> None:
+        await self._session.rollback()

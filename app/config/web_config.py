@@ -6,6 +6,7 @@ from app.util import config_util
 class WebConfig(BaseSettings):
     host: str
     port: int
+    forwarded_allow_ip:str = "127.0.0.1"
 
     model_config = config_util.get_setting_config("WEB_")
 

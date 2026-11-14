@@ -19,5 +19,6 @@ dependencies = [
     "pyjwt>=2.15.1",
     "sqlalchemy>=2.1.8",
     "uvicorn>=0.54.0",
-    "sqlalchemy[asyncio]>=2.1.8"
+    "sqlalchemy[asyncio]>=2.1.8",
+    "aiosmtplib>=5.1.3",
 ]
