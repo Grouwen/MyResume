@@ -1,8 +1,6 @@
 from pathlib import Path
-import re
 import difflib
 import re
-import unicodedata
 from bisect import bisect_right
 import aiofiles
 import unicodedata

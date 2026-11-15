@@ -2,15 +2,25 @@
 
 插件布局：
     app/agent/plug/<插件包>/__init__.py
-        PLUG_META = {"name": ..., "description": ..., "version": ...}
-    app/agent/plug/<插件包>/xxx.py
+        PLUG_META = {
+            "name": ..., "description": ..., "version": ...,
+            # 可选：工具代码所在目录，相对插件根目录；不写 = 插件根目录本身
+            "tools_path": "tools",
+        }
+    app/agent/plug/<插件包>/tools/xxx.py     # 写了 tools_path="tools" 时，工具放这里
         @tool 装饰的工具
+    app/agent/plug/<插件包>/xxx.py           # 不写 tools_path 时，工具直接放插件根目录
+        @tool 装饰的工具
+
+tools_path 只换工具代码的存放位置，插件根目录永远是 PLUG_META 所在的插件包本身
+（比如 github_research/），工具目录必须是它的子目录。
 """
 
 import importlib
 from app.core.loger import get_logger
 import pkgutil
 from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
 
 from jinja2 import Template
 from langchain_core.tools import BaseTool
@@ -28,6 +38,8 @@ class PlugInfo:
     description: str              # 一句话用途
     version: str                  # 版本号
     package_name: str = ""        # 真实模块路径，调试用
+    tools_path: str = ""          # 工具目录，相对插件根；空 = 插件根目录本身
+    tools_dir: str = ""           # 解析后的工具目录绝对路径，调试用
     tools: list[BaseTool] = field(default_factory=list)
 
 
@@ -105,12 +117,18 @@ class PlugRegis:
                 logger.info("插件已禁用，跳过：%s（%s）", name, info.name)
                 continue
 
+            # 新增：没写 tools_path 就用插件根目录，工具照旧放插件包里
+            tools_path = self._normalize_tools_path(meta.get("tools_path"), info.name)
+            tools_root = self._tools_root(plug_pkg, tools_path)
+
             plugs[name] = PlugInfo(
                 name=name,
                 description=str(meta.get("description", "")).strip(),
                 version=str(meta.get("version", "0.0.0")).strip(),
                 package_name=info.name,
-                tools=self._collect_tools(plug_pkg),
+                tools_path=tools_path,
+                tools_dir=self._module_dir(tools_root),
+                tools=self._collect_tools(tools_root),
             )
             logger.info("加载插件 %s <- %s", name, info.name)
 
@@ -121,8 +139,9 @@ class PlugRegis:
         # 日志全在文件内部打，app.py 那边不用再写循环
         for plug in plugs.values():
             logger.info(
-                "加载plug-> %s: %s 版本号:%s tool数量:%d",
-                plug.name, plug.description, plug.version, len(plug.tools),
+                "加载plug-> %s: %s 版本号:%s 工具目录:%s tool数量:%d",
+                plug.name, plug.description, plug.version,
+                plug.tools_dir or "插件根目录", len(plug.tools),
             )
 
         if not plugs:
@@ -131,32 +150,94 @@ class PlugRegis:
             logger.info("已加载 %d 个插件：%s", len(plugs), list(plugs))
         return plugs
 
-    def _collect_tools(self, plug_pkg) -> list[BaseTool]:
+    def _tools_root(self, plug_pkg, tools_path: str):
+        """拿到工具代码的根模块：tools_path 为空就是插件包自己。"""
+        if not tools_path:
+            return plug_pkg
+
+        module_name = f"{plug_pkg.__name__}.{tools_path}"
+        return self._import(
+            module_name,
+            f"工具目录（PLUG_META.tools_path={tools_path!r}，目录里需要 __init__.py）",
+        )
+
+    def _collect_tools(self, tools_root) -> list[BaseTool]:
+        """扫工具根模块下的所有模块，收本模块 @tool 出来的工具。"""
+        # tools_path 指向单个 .py 文件而不是包：只收这个模块里的工具
+        if not hasattr(tools_root, "__path__"):
+            tools: list[BaseTool] = []
+            self._extend_tools(tools, set(), tools_root)
+            return tools
+
         tools: list[BaseTool] = []
         seen: set[int] = set()
 
         for info in pkgutil.walk_packages(
-                plug_pkg.__path__,
-                prefix=f"{plug_pkg.__name__}.",
+                tools_root.__path__,
+                prefix=f"{tools_root.__name__}.",
                 onerror=self._raise_walk_error,
         ):
             if info.ispkg:
                 continue
 
             module = self._import(info.name, "插件模块")
-            for attr_name, obj in vars(module).items():
-                if not isinstance(obj, BaseTool) or id(obj) in seen:
-                    continue
-                # 只收本模块 @tool 出来的，排除从别处 import 进来的
-                if not self._defined_in(obj, module.__name__):
-                    continue
-                seen.add(id(obj))
-
-                if not obj.name:
-                    raise PlugLoadError(f"工具缺少 name：{module.__name__}.{attr_name}")
-                tools.append(obj)
+            self._extend_tools(tools, seen, module)
 
         return tools
+
+    def _extend_tools(self, tools: list[BaseTool], seen: set[int], module) -> None:
+        for attr_name, obj in vars(module).items():
+            if not isinstance(obj, BaseTool) or id(obj) in seen:
+                continue
+            # 只收本模块 @tool 出来的，排除从别处 import 进来的
+            if not self._defined_in(obj, module.__name__):
+                continue
+            seen.add(id(obj))
+
+            if not obj.name:
+                raise PlugLoadError(f"工具缺少 name：{module.__name__}.{attr_name}")
+            tools.append(obj)
+
+    @staticmethod
+    def _normalize_tools_path(raw, plug_module: str) -> str:
+        """校验并规范化 PLUG_META.tools_path，返回相对插件根目录的点分模块路径。
+
+        None / "" / "."  -> ""           工具就放插件根目录，老插件不用改
+        "tools" / "./tools" / "tools/"   -> "tools"
+        "sub/tools" / "sub\\tools"        -> "sub.tools"
+        """
+        if raw is None:
+            return ""
+        if not isinstance(raw, str):
+            raise PlugLoadError(
+                f"{plug_module} 的 PLUG_META.tools_path 必须是字符串"
+                f"（相对插件根目录的目录名），现在是 {raw!r}"
+            )
+
+        text = raw.strip().replace("\\", "/")
+        if not text or text == ".":
+            return ""
+
+        if text.startswith("/"):
+            raise PlugLoadError(
+                f"{plug_module} 的 PLUG_META.tools_path 必须是相对插件根目录的路径，"
+                f"不能用绝对路径：{raw!r}"
+            )
+
+        parts = [p for p in PurePosixPath(text).parts if p not in ("", ".")]
+        if ".." in parts:
+            raise PlugLoadError(
+                f"{plug_module} 的 PLUG_META.tools_path 不能用 .. 跳出插件目录：{raw!r}"
+            )
+        if not parts:
+            return ""
+        return ".".join(parts)
+
+    @staticmethod
+    def _module_dir(mod) -> str:
+        """模块所在目录的绝对路径，给 PlugInfo.tools_dir 调试用。"""
+        path = getattr(mod, "__file__", None)
+        return str(Path(path).parent) if path else ""
 
     @staticmethod
     def _defined_in(obj: BaseTool, module_name: str) -> bool:
@@ -202,36 +283,3 @@ class PlugRegis:
                         f"工具名冲突：插件 {plug.name}（{plug.package_name}）的工具 {tool.name} "
                         f"已被基础工具占用，LLM 工具名必须全局唯一"
                     )
-
-if __name__ == "__main__":
-    a = """# 你是一个专业的找工作顾问专家，你可以加载插件(plug)与技能(skill)来满足用户需求。
-
-## 你有如下plug:
-{% for plug in plugs %}
-- {{ plug.name }}: {{ plug.description }}
-{% else %}
-- 暂无
-{% endfor %}
-
-## 你有如下skill:
-{% for skill in skills %}
-- {{ skill.name }}: {{ skill.description }}
-{% else %}
-- 暂无
-{% endfor %}"""
-    regis = PlugRegis("app.agent.plug")
-    print(list(regis.load().values()))
-    system_prompt = Template(a).render(
-        plugs=list(regis.load().values())
-    )
-    print(system_prompt)
-
-    # for plug in regis.load().values():
-    #     tool_names = [t.name for t in plug.tools]
-    #     print(
-    #         f"{plug.name}: {plug.description} "
-    #         f"v{plug.version} | 包 {plug.package_name} | 工具 {tool_names}"
-    #     )
-    # print("工具总数：", len(regis.list_tools()))
-    #
-    # print(regis.load())

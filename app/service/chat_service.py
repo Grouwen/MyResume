@@ -34,6 +34,8 @@ logger = get_logger(__name__)
 
 _bg_tasks: set[Task] = set()
 
+RECURSION_LIMIT = 50
+
 EXPIRES_HOUR = 2
 
 class ChatService:
@@ -159,7 +161,7 @@ class ChatService:
                 httpx_oper=self._httpx_oper
             )
 
-            config = {"configurable": {"thread_id": thread_id}}
+            config = {"configurable": {"thread_id": thread_id},"recursion_limit": RECURSION_LIMIT}
 
             main_agent = main_agent_no_checkpointer if no_save else self._main_agent
 
@@ -221,7 +223,7 @@ class ChatService:
                 queue.put_nowait(
                     ServerSentEvent(
                         event=AgentEnum.ERROR.value,
-                        data=Result.error(f"错误：{type(e).__name__}: {e}"),
+                        data=Result.error(f"错误：{type(e).__name__}"),
                     )
                 )
             if not no_save:
