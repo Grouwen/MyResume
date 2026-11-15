@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Text, String, DateTime, func, Index, Uuid
+from sqlalchemy import BigInteger, Text, String, DateTime, func, Index, Uuid, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.enum.running_chat_type_enum import RunningChatTypeEnum
@@ -40,8 +40,23 @@ class RunningChat(Base):
         nullable=False
     )
 
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False
+    )
+
     __table_args__ = (
         Index("ix_running_chat_session_started", "session_pk", "started_at"),
         Index("ix_running_chat_user_started", "user_id", "started_at"),
-        Index("ix_running_chat_running","started_at")
+        Index("ix_running_chat_running","started_at"),
+        Index(
+            "ix_running_chat_running_expires",
+            "expires_at",
+            postgresql_where=text(f"status = '{RunningChatTypeEnum.RUNNING.value}'"),
+        ),
+        Index(
+            "ix_running_chat_finished_expires",
+            "expires_at",
+            postgresql_where=text(f"status <> '{RunningChatTypeEnum.RUNNING.value}'"),
+        ),
     )

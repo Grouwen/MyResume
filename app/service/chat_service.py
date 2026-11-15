@@ -1,6 +1,7 @@
 import asyncio
 import uuid
 from asyncio import Task, Queue, Event
+from datetime import datetime, timezone, timedelta
 from typing import AsyncIterator
 
 import aiofiles
@@ -32,6 +33,8 @@ from app.schema.user_schema import UserSchema
 logger = get_logger(__name__)
 
 _bg_tasks: set[Task] = set()
+
+EXPIRES_HOUR = 2
 
 class ChatService:
     def __init__(self, llm_factory: LLMFactory,
@@ -89,7 +92,11 @@ class ChatService:
                 thread_id = f"{user_id}:{chat_schema.session_pk}"
                 await self._session_pg_repo.upsert_session(chat_schema.session_pk, user_id, thread_id)
                 await self._running_chat_pg_repo.add_running_chat(
-                    RunningChat(user_id=user_id, session_pk=chat_schema.session_pk, user_input=chat_schema.user_input)
+                    RunningChat(user_id=user_id,
+                                session_pk=chat_schema.session_pk,
+                                user_input=chat_schema.user_input,
+                                expires_at=datetime.now(timezone.utc) + timedelta(hours=EXPIRES_HOUR)
+                                )
                 )
                 await self._running_chat_pg_repo.commit()
                 await self._session_pg_repo.close()

@@ -18,6 +18,7 @@ class RunningChatPgRepo(PgRepository):
             .where(
                 RunningChat.user_id == user_id,
                 RunningChat.status == RunningChatTypeEnum.RUNNING.value,
+                RunningChat.expires_at > func.now(),
             )
         )
         result = await self._session.execute(stmt)
@@ -30,6 +31,7 @@ class RunningChatPgRepo(PgRepository):
             .where(
                 RunningChat.session_pk == session_pk,
                 RunningChat.status == RunningChatTypeEnum.RUNNING.value,
+                RunningChat.expires_at > func.now(),
             )
         )
         result = await self._session.execute(stmt)
