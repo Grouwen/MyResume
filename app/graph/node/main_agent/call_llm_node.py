@@ -20,6 +20,75 @@ logger = get_logger(__name__)
 
 MAX_TURNS = 8
 
+from langchain_core.messages import AIMessage, ToolMessage
+
+
+KEEP_RECENT_TOOLS = 3
+
+SLIM_MIN_CHARS = 1000
+
+SLIM_MARK = "[结果已省略"
+
+
+def _tool_call_args(messages: list) -> dict:
+    """tool_call_id -> (工具名, 参数)。取件单要能照着重放这次调用。"""
+    mapping: dict = {}
+    for message in messages:
+        if isinstance(message, AIMessage):
+            for call in message.tool_calls or []:
+                mapping[call.get("id")] = (call.get("name") or "?", call.get("args") or {})
+    return mapping
+
+
+def _render_args(args: dict) -> str:
+    text = ", ".join(f"{k}={v!r}" for k, v in args.items())
+    return text if len(text) <= 100 else text[:100] + "…"
+
+
+def _placeholder(name: str, args: dict, size: int) -> str:
+    return (
+        f"{SLIM_MARK}：{name}({_render_args(args)}) 返回 {size} 字符。"
+        f"需要时用同样参数再调一次。]"
+    )
+
+
+def slim_tool_messages(messages: list,
+                       keep_recent: int = KEEP_RECENT_TOOLS,
+                       min_chars: int = SLIM_MIN_CHARS) -> tuple[list, int]:
+    """返回 (瘦身后的新列表, 省下的字符数)。
+
+    用 model_copy 生成新消息，传进来的原消息（state 里的对象）不会有任何改动；
+    id / tool_call_id / name / artifact 都原样保留，只是正文换掉了。
+    """
+    candidates = [
+        message for message in messages
+        if isinstance(message, ToolMessage)
+        and isinstance(message.content, str)
+        and len(message.content) >= min_chars
+    ]
+    if not candidates:
+        return messages, 0
+
+    # 最近 keep_recent 条大结果保持原文；tool_call_id 全局唯一，用它做标记
+    keep_ids = {m.tool_call_id for m in candidates[-keep_recent:]} if keep_recent else set()
+    args_map = _tool_call_args(messages)
+
+    saved = 0
+    result: list = []
+    for message in messages:
+        if (isinstance(message, ToolMessage)
+                and isinstance(message.content, str)
+                and len(message.content) >= min_chars
+                and message.tool_call_id not in keep_ids):
+            name, args = args_map.get(message.tool_call_id, (message.name or "?", {}))
+            content = _placeholder(name, args, len(message.content))
+            saved += len(message.content) - len(content)
+            result.append(message.model_copy(update={"content": content}))
+        else:
+            result.append(message)
+
+    return result, saved
+
 def combin_system_prompt(agent_md_content:str,system_prompt_template:str,
                          skill_regis: SkillRegis,plug_regis: PlugRegis,
                          loaded_plugs: Dict[str,str]):
@@ -74,9 +143,8 @@ def summarize_ai_msg(resp: AIMessage) -> str:
 async def call_llm_node(state:MainAgentState,
                         runtime:Runtime[MainAgentContext]):
     # state取值
-    user_input = state["user_input"]
     messages = state.get("messages",[])
-    loaded_plugs = state["loaded_plugs"]
+    loaded_plugs = state.get("loaded_plugs",{})
 
     # context取值
     llm_model = runtime.context.llm_model
@@ -87,6 +155,10 @@ async def call_llm_node(state:MainAgentState,
     system_prompt_template = runtime.context.system_prompt_template
 
     # ------ 业务逻辑 ------
+    # 清洗plug中已没有，但loaded_plug仍有的plug
+    all_plugs_name = {p.name for p in plug_regis.load().values()}
+    loaded_plugs = {n: d for n, d in loaded_plugs.items() if n in all_plugs_name}
+
     # 拼接系统提示词
     system_prompt = combin_system_prompt(agent_md_content,system_prompt_template,
                                          skill_regis,plug_regis,loaded_plugs)
@@ -94,7 +166,9 @@ async def call_llm_node(state:MainAgentState,
 
     # 获取可用tools，裁剪历史
     tools:List[BaseTool] = get_active_tools(tool_regis,plug_regis, loaded_plugs)
-    history = trim_by_turns(messages)
+    history, slim_saved = slim_tool_messages(trim_by_turns(messages))
+    if slim_saved:
+        logger.info(f"历史瘦身 saved_chars={slim_saved}")
 
     # 调用llm
     llm_model_with_tool = llm_model.bind_tools(tools)

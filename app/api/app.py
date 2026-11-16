@@ -60,7 +60,7 @@ async def lifespan(app: FastAPI):
         )
         skill_regis = SkillRegis("app.agent.skill")
 
-        # ---- LangGraph checkpointer（同一个 PG 库，独立小池） ----
+        # ---- LangGraph checkpointer ----
         if checkpoint_config.backend == "postgres":
             checkpointer = await stack.enter_async_context(open_checkpointer())
         else:
