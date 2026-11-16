@@ -13,3 +13,7 @@ class MainAgentState(TypedDict,StatisticsState):
     loaded_plugs: Dict[str, str] # 已加载的plugs name: description
 
     finalize: bool # 是否结束
+
+    budget_stop: bool # 本轮步数到软上限，已转为询问用户是否继续
+
+    turn_llm_steps: int # 本轮已用掉的 LLM 决策次数，entrance 每轮复位

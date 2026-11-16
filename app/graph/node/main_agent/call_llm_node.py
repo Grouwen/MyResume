@@ -3,12 +3,13 @@ from typing import Dict, List
 import json
 
 from jinja2 import Template
-from langchain_core.messages import AIMessage, SystemMessage, HumanMessage, BaseMessage
+from langchain_core.messages import AIMessage, SystemMessage, HumanMessage, BaseMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langgraph.runtime import Runtime
 
 from app.agent.core.plug_regis import PlugRegis
 from app.agent.core.skill_regis import SkillRegis
+from app.core.constants import MAX_LLM_STEPS_PER_TURN
 from app.core.loger import get_logger
 from app.graph.context.main_agent_context import MainAgentContext
 from app.graph.state.main_agent.main_agent_state import MainAgentState
@@ -20,8 +21,15 @@ logger = get_logger(__name__)
 
 MAX_TURNS = 8
 
-from langchain_core.messages import AIMessage, ToolMessage
+# 软上限收尾指令：汇报成果 + 剩余事项 + 询问是否继续
+BUDGET_STOP_PROMPT = (
+    "【系统】本轮工具调用预算已用完，现在不能再调用工具。"
+    "请用两三句话收尾：①已经完成了什么（只写确实做完的）；②还剩什么没做；"
+    "最后明确问用户是否愿意继续（用户回复「继续」即接着做，并会重新分配额度）。"
+    "不要重复计划，不要反问需求细节。"
+)
 
+BUDGET_STOP_FALLBACK = "本轮工具调用次数已到上限，我先停一下。要继续吗？回复「继续」我就接着做。"
 
 KEEP_RECENT_TOOLS = 3
 
@@ -171,13 +179,27 @@ async def call_llm_node(state:MainAgentState,
         logger.info(f"历史瘦身 saved_chars={slim_saved}")
 
     # 调用llm
-    llm_model_with_tool = llm_model.bind_tools(tools)
     send_messages = [
         SystemMessage(system_prompt),
         *history
     ]
 
-    resp:AIMessage = await llm_model_with_tool.ainvoke(send_messages)
+    # 按轮计数：langgraph_step 是 thread 累计值，跨轮不复位，不能用来判本轮预算
+    turn_llm_steps = int(state.get("turn_llm_steps") or 0) + 1
+    budget_stop = turn_llm_steps > MAX_LLM_STEPS_PER_TURN
+
+    resp:AIMessage
+    if budget_stop:
+        # 不绑工具：模型调不了工具，只能汇报成果 + 剩余事项 + 问是否继续
+        send_messages.append(HumanMessage(BUDGET_STOP_PROMPT))
+        resp = await llm_model.ainvoke(send_messages)
+        if not (resp.content or "").strip():
+            resp = AIMessage(BUDGET_STOP_FALLBACK)
+        logger.info("本轮已用 %d 次 LLM 决策（软上限 %d），不再给工具，转为询问用户是否继续",
+                    turn_llm_steps, MAX_LLM_STEPS_PER_TURN)
+    else:
+        llm_model_with_tool = llm_model.bind_tools(tools)
+        resp = await llm_model_with_tool.ainvoke(send_messages)
 
     logger.info("ai回复 %s", summarize_ai_msg(resp))
     if logger.isEnabledFor(logging.DEBUG):
@@ -190,5 +212,7 @@ async def call_llm_node(state:MainAgentState,
             )
 
     return {
-        "messages": [resp]
+        "messages": [resp],
+        "budget_stop": budget_stop,
+        "turn_llm_steps": turn_llm_steps,
     }

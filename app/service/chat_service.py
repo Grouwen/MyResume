@@ -2,10 +2,12 @@ import asyncio
 import uuid
 from asyncio import Task, Queue, Event
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import AsyncIterator
 
 import aiofiles
 from fastapi.sse import ServerSentEvent
+from langgraph.errors import GraphRecursionError
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
@@ -14,7 +16,8 @@ from app.agent.core.skill_regis import SkillRegis
 from app.agent.core.tool_regis import ToolRegis
 from app.agent.main_agent import  main_agent_no_checkpointer
 from langgraph.graph.state import CompiledStateGraph
-from app.core.constants import AGENT_WORK_SPACE_PATH, PROMPTS_PATH, AGENT_ROOT, PER_USER_MAX_CHAT
+from app.core.constants import (AGENT_WORK_SPACE_PATH, PROMPTS_PATH, AGENT_ROOT, PER_USER_MAX_CHAT,
+                                RECURSION_LIMIT)
 from app.core.enum.running_chat_type_enum import RunningChatTypeEnum
 from app.core.enum.sse_enum import AgentEnum
 from app.core.loger import get_logger
@@ -33,8 +36,6 @@ from app.schema.user_schema import UserSchema
 logger = get_logger(__name__)
 
 _bg_tasks: set[Task] = set()
-
-RECURSION_LIMIT = 50
 
 EXPIRES_HOUR = 2
 
@@ -105,9 +106,10 @@ class ChatService:
             else:
                 thread_id = f"{user_id}:{uuid.uuid4().hex}"
 
-
+            agent_work_space = AGENT_WORK_SPACE_PATH / str(user_id)
+            agent_work_space.mkdir(parents=True, exist_ok=True)
             task = asyncio.create_task(
-                self._run_agent(thread_id,chat_schema,queue,isgone,
+                self._run_agent(thread_id,agent_work_space,chat_schema,queue,isgone,
                                 self._pg_session_factory,not is_login),
                 name=f"thread_id-{thread_id}",
             )
@@ -129,7 +131,7 @@ class ChatService:
                 task.cancel()
 
 
-    async def _run_agent(self,thread_id:str,chat_schema:ChatSchema,queue:Queue,isgone:Event,
+    async def _run_agent(self,thread_id:str,agent_work_space:Path,chat_schema:ChatSchema,queue:Queue,isgone:Event,
                          pg_session_factory:async_sessionmaker[AsyncSession],no_save:bool=False):
         try:
             cred = LLMCredential(
@@ -151,7 +153,7 @@ class ChatService:
             )
 
             context = MainAgentContext(
-                agent_work_space=AGENT_WORK_SPACE_PATH,
+                agent_work_space=agent_work_space,
                 agent_md_content=agent_md_content,
                 system_prompt_template=system_prompt_template,
                 llm_model = llm_model,
@@ -206,9 +208,13 @@ class ChatService:
                                           })))
 
                 elif kind == "on_chain_end" and event.get("name") == "LangGraph":
+                    # 最终 state 就在 output 里；budget_stop=True 表示是被软上限停下问用户的
+                    output = event["data"].get("output")
+                    output = output if isinstance(output, dict) else {}
                     queue.put_nowait(ServerSentEvent(event=AgentEnum.DONE.value,
                                           data=Result.ok({
-                                              "session_pk":chat_schema.session_pk
+                                              "session_pk":chat_schema.session_pk,
+                                              "need_confirm": bool(output.get("budget_stop", False)),
                                           })))
                     break
 
@@ -218,17 +224,27 @@ class ChatService:
                     await running_chat_pg_repo.update_running_chat_status(chat_schema.session_pk, RunningChatTypeEnum.DONE)
 
         except Exception as e:
-            logger.error(f"chat 流式处理失败：{e}")
+            # 硬上限兜底：软上限正常会先拦住，这里防"某一轮多吃了步数"
+            if isinstance(e, GraphRecursionError):
+                logger.warning("图步数超限 session=%s", chat_schema.session_pk)
+                msg = "本轮工具调用次数达到上限，已暂停。回复「继续」我就接着做。"
+                # 这是正常暂停，不是失败：标 DONE，别占并发名额也别让用户以为是错误
+                status = RunningChatTypeEnum.DONE
+            else:
+                logger.error(f"chat 流式处理失败：{e}")
+                msg = f"错误：{type(e).__name__}"
+                status = RunningChatTypeEnum.ERROR
+
             if not isgone.is_set():
                 queue.put_nowait(
                     ServerSentEvent(
                         event=AgentEnum.ERROR.value,
-                        data=Result.error(f"错误：{type(e).__name__}"),
+                        data=Result.error(msg),
                     )
                 )
             if not no_save:
                 async with pg_session_factory.begin() as session:
                     running_chat_pg_repo = RunningChatPgRepo(session)
-                    await running_chat_pg_repo.update_running_chat_status(chat_schema.session_pk,RunningChatTypeEnum.ERROR)
+                    await running_chat_pg_repo.update_running_chat_status(chat_schema.session_pk, status)
         finally:
             queue.put_nowait(None)
